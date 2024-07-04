@@ -1,0 +1,156 @@
+# Seed needs to be set at top of yaml, before objects with parameters are made
+seed: 1234
+__set_seed: !!python/object/apply:torch.manual_seed [ !ref <seed> ]
+output_folder: !ref results/Orfeo_reldep/<seed>
+wer_file: !ref <output_folder>/wer.txt
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+
+#Data files
+data_folder: /home/getalp/pupiera/thesis/endtoend_asr_multitask/src/conllu/gold/ #/home/pupiera/getalp/pupiera/conllu/gold
+train_conllu: !ref <data_folder>/cleaned_v2_train.conllu #!ref <data_folder>/orfeo_shuf.train
+valid_conllu: !ref <data_folder>/cleaned_v2_valid.conllu #!ref <data_folder>/orfeo_shuf.dev
+test_conllu: !ref <data_folder>/cleaned_v2_test_2.conllu
+
+# Specific information related to conllu file
+conllu_keys: [ 'lineNumber', 'words', 'lemmas','POS','UPOS','tags',
+               'HEAD','DEP','tags2','tags3','timestamp_begin',
+               'timestamp_end','speaker' ]
+
+
+# With data_parallel batch_size is split into N jobs
+# With DDP batch_size is multiplied by N jobs
+# Must be 6 per GPU to fit 16GB of VRAM
+batch_size: 8 #8
+test_batch_size: 4 #4
+
+dataloader_options:
+  batch_size: !ref <batch_size>
+  num_workers: 8
+test_dataloader_options:
+  batch_size: !ref <test_batch_size>
+  num_workers: 8
+
+
+
+# Decoding parameters
+# Be sure that the bos and eos index match with the BPEs ones
+blank_index: 0
+bos_index: 5
+eos_index: 6
+
+
+#tokenizer
+pretrained_lm_path: /home/getalp/pupiera/thesis/endtoend_asr_multitask/src/LM/camembert-base
+
+embedding_dim: 768
+
+# Training parameters
+number_of_epochs: 40
+  #number_of_epochs_static: 50
+
+ckpt_interval_minutes: 30 # save checkpoint every N minutes
+
+lr: 0.001
+model_opt_class: !name:torch.optim.Adam
+  lr: !ref <lr>
+
+# feature extractor
+features_extractor: !new:parsebrain.hugging_face_text.LastSubWordEmbedding
+
+#
+#model
+#
+
+output_neuronsDep: 19 #Nb Label of dep
+output_neuronsGov: 846 #Nb label of Gov + relPos
+output_neuronsPOS: 23 #Nb different POS
+
+
+
+rnn_hidden_size: 768
+rnn_num_layer: 3
+rnn_bidirectional: True
+
+neural_network:  !new:speechbrain.nnet.RNN.LSTM
+  input_shape: [null, null, 768]
+  hidden_size: !ref <rnn_hidden_size>
+  num_layers: !ref <rnn_num_layer>
+  bias: True
+  dropout: 0.5
+  bidirectional: !ref <rnn_bidirectional>
+
+dep2LabelHidden: !ref <rnn_hidden_size>
+
+depDep2Label: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dep2LabelHidden>*2
+    n_neurons: !ref <output_neuronsDep>
+
+govDep2Label: !new:speechbrain.nnet.linear.Linear
+    input_size:  !ref <dep2LabelHidden>*2
+    n_neurons: !ref <output_neuronsGov>
+
+posDep2Label: !new:speechbrain.nnet.linear.Linear
+    input_size:  !ref <dep2LabelHidden>*2
+    n_neurons: !ref <output_neuronsPOS>
+
+log_softmax: !new:speechbrain.nnet.activations.Softmax
+  apply_log: True
+
+#
+# Functions and classes
+#
+
+encoding: !new:parsebrain.processing.dependency_parsing.sequence_labeling.encoding.RelPosEncoding
+
+
+epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
+  limit: !ref <number_of_epochs>
+
+modules:
+  neural_network: !ref <neural_network>
+  govDep2Label: !ref <govDep2Label>
+  depDep2Label: !ref <depDep2Label>
+  posDep2Label: !ref <posDep2Label>
+
+model: !new:torch.nn.ModuleList
+  - [!ref <neural_network>, !ref <govDep2Label>, !ref <depDep2Label> ,!ref <posDep2Label>]
+#
+# loss
+#
+depLabel_cost: !name:speechbrain.nnet.losses.nll_loss
+
+govLabel_cost: !name:speechbrain.nnet.losses.nll_loss
+
+posLabel_cost: !name:speechbrain.nnet.losses.nll_loss
+
+#
+# metrics
+#
+
+eval_conll: !new:parsebrain.processing.dependency_parsing.eval.conll18_ud_eval.TextEval
+evaluator: !new:parsebrain.processing.dependency_parsing.sequence_labeling.encoding.DecoderRelPos
+    eval_st: !ref <eval_conll>
+
+#
+# CONLLU output file
+#
+
+file_valid: !ref <output_folder>/output_VALID.conll
+file_test: !ref <output_folder>/output_TEST.conll
+
+#
+# Checkpointer
+#
+
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+  checkpoints_dir: !ref <save_folder>
+  recoverables:
+    model: !ref <model>
+    #scheduler_model: !ref <lr_annealing_model>
+    counter: !ref <epoch_counter>
+
+
+train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
+    save_file: !ref <train_log>
+

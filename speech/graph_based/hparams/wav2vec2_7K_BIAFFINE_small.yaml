@@ -1,0 +1,384 @@
+# ################################
+# Model: wav2vec2 + DNN + Biaffine parser
+# Augmentation: SpecAugment
+# Authors: Titouan Parcollet 2021 + Adrien PUPIER 2022
+# ################################
+
+# Seed needs to be set at top of yaml, before objects with parameters are made
+seed: 1234
+__set_seed: !!python/object/apply:torch.manual_seed [!ref <seed>]
+output_folder: !ref results/wav2vec2_ctc_FR_AUDIO_small/<seed>
+wer_file: !ref <output_folder>/wer.txt
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+
+# URL for the biggest LeBenchmark wav2vec french.
+wav2vec2_hub: LeBenchmark/wav2vec2-FR-7K-large
+
+# Data files
+data_folder:  /home/getalp/data/ASR_data/FR/CORPUS_AUDIO/cefc-orfeo_v.1.5_december2021/11/oral  # e.g, /localscratch/cv-corpus-5.1-2020-06-22/fr
+train_tsv_file: !ref <data_folder>/train.tsv  # Standard CommonVoice .tsv files
+dev_tsv_file: !ref <data_folder>/dev.tsv  # Standard CommonVoice .tsv files
+test_tsv_file: !ref <data_folder>/test.tsv  # Standard CommonVoice .tsv files
+accented_letters: True
+language: fr # use 'it' for Italian, 'rw' for Kinyarwanda, 'en' for english
+train_csv: !ref <save_folder>/train.csv
+valid_csv: !ref <save_folder>/dev.csv
+test_csv: !ref <save_folder>/test.csv
+skip_prep: True # Skip data preparation
+
+#CONLLU GOLD FILE used for evaluation
+dir_gold_conllu: /home/getalp/pupiera/thesis/endtoend_asr_multitask/src/conllu/gold
+dev_gold_conllu: !ref <dir_gold_conllu>/cleaned_v2_valid.conllu
+test_gold_conllu: !ref <dir_gold_conllu>/cleaned_v2_test.conllu
+dev_output_conllu: !ref <output_folder>/Eval-Valid_AUDIO
+test_output_conllu: !ref <output_folder>/Eval-test_AUDIO
+transcript_file: transcript_test_AUDIO
+# We remove utterance slonger than 10s in the train/dev/test sets as
+# longer sentences certainly correspond to "open microphones".
+avoid_if_longer_than: 10.0
+
+avoid_if_shorter_than: 0.3
+
+# Training parameters
+number_of_epochs: 30
+number_of_ctc_epochs: 15
+lr: 1.0
+lr_wav2vec: 0.0001
+ctc_weight: 0.3
+sorting: ascending
+auto_mix_prec: False
+sample_rate: 16000
+ckpt_interval_minutes: 30 # save checkpoint every N min
+
+# With data_parallel batch_size is split into N jobs
+# With DDP batch_size is multiplied by N jobs
+# Must be 6 per GPU to fit 16GB of VRAM
+batch_size: 8
+test_batch_size: 4
+
+dataloader_options:
+    batch_size: !ref <batch_size>
+    num_workers: 6
+test_dataloader_options:
+    batch_size: !ref <test_batch_size>
+    num_workers: 6
+
+# BPE parameters
+token_type: char  # ["unigram", "bpe", "char"]
+character_coverage: 1.0
+
+# Model parameters
+activation: !name:torch.nn.LeakyReLU
+dnn_layers: 3
+dnn_neurons: 1024
+emb_size: 128
+dec_neurons: 1024
+freeze_wav2vec: False
+
+# Outputs
+output_neurons: 76  # BPE size, index(blank/eos/bos) = 0
+
+# Decoding parameters
+# Be sure that the bos and eos index match with the BPEs ones
+blank_index: 0
+bos_index: 1
+eos_index: 2
+min_decode_ratio: 0.0
+max_decode_ratio: 1.0
+beam_size: 80
+eos_threshold: 1.5
+using_max_attn_shift: True
+max_attn_shift: 140
+ctc_weight_decode: 0.0
+temperature: 1.50
+
+#
+# FUSION LAYER
+#
+
+repFusionHidden: 500
+repFusionBidirectional: False
+repFusionLayers: 2
+RepFusionModel: !new:speechbrain.nnet.RNN.LSTM
+    input_shape: [null, null, 1024] # enc val
+    hidden_size: !ref <repFusionHidden>
+    num_layers: !ref <repFusionLayers>
+    bias: True
+    dropout: 0.5
+    bidirectional: !ref <repFusionBidirectional>
+
+#
+# Embedding layer (Unique purpose is to get a representation for ROOT dummy tokens.
+#
+
+embedding_root: !new:speechbrain.nnet.embedding.Embedding
+  num_embeddings: 1
+  embedding_dim: 500
+  consider_as_one_hot: False
+
+#
+# GRAPH Parser
+#
+number_pos: 24
+num_labels: 17
+mlp_input: !ref <rnn_hidden_size> * 2
+n_neurons: 256
+
+pos_tagger: !new:speechbrain.nnet.containers.Sequential
+  input_shape: [ null, null, !ref <mlp_input> ]
+  linear1: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <n_neurons>
+    bias: True
+  bn1: !name:speechbrain.nnet.normalization.BatchNorm1d
+  activation: !new:torch.nn.LeakyReLU
+  drop: !new:torch.nn.Dropout
+    p: 0.50
+  linear_head: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <number_pos>
+    bias: True
+  log_softmax: !new:speechbrain.nnet.activations.Softmax
+    apply_log: True
+
+
+arc_d: !new:speechbrain.nnet.containers.Sequential
+  input_shape: [ null, null, !ref <mlp_input> ]
+  linear1: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <n_neurons>
+    bias: True
+  bn1: !name:speechbrain.nnet.normalization.BatchNorm1d
+  activation: !new:torch.nn.LeakyReLU
+  drop: !new:torch.nn.Dropout
+    p: 0.50
+  linear_head: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <n_neurons>
+    bias: True
+
+arc_h: !new:speechbrain.nnet.containers.Sequential
+  input_shape: [ null, null, !ref <mlp_input> ]
+  linear1: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <n_neurons>
+    bias: True
+  bn1: !name:speechbrain.nnet.normalization.BatchNorm1d
+  activation: !new:torch.nn.LeakyReLU
+  drop: !new:torch.nn.Dropout
+    p: 0.50
+  linear_head: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <n_neurons>
+    bias: True
+
+lab_d: !new:speechbrain.nnet.containers.Sequential
+  input_shape: [ null, null, !ref <mlp_input> ]
+  linear1: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <n_neurons>
+    bias: True
+  bn1: !name:speechbrain.nnet.normalization.BatchNorm1d
+  activation: !new:torch.nn.LeakyReLU
+  drop: !new:torch.nn.Dropout
+    p: 0.50
+  linear_head: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <n_neurons>
+    bias: True
+
+lab_h: !new:speechbrain.nnet.containers.Sequential
+  input_shape: [ null, null, !ref <mlp_input> ]
+  linear1: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <n_neurons>
+    bias: True
+  bn1: !name:speechbrain.nnet.normalization.BatchNorm1d
+  activation: !new:torch.nn.LeakyReLU
+  drop: !new:torch.nn.Dropout
+    p: 0.50
+  linear_head: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <n_neurons>
+    bias: True
+
+
+# same value than in hops
+rnn_hidden_size: !ref <n_neurons>
+rnn_num_layer: 3
+rnn_bidirectional: True
+rnn_input: !ref <repFusionHidden>
+
+rnn:  !new:speechbrain.nnet.RNN.LSTM
+  input_shape: [null, null, !ref <rnn_input>]
+  hidden_size: !ref <rnn_hidden_size>
+  num_layers: !ref <rnn_num_layer>
+  bias: True
+  dropout: 0.5
+  bidirectional: !ref <rnn_bidirectional>
+
+graph_parser: !new:parsebrain.processing.dependency_parsing.graph_based.BiAffineParser
+  pos_tagger: !ref <pos_tagger>
+  arc_h: !ref <arc_h>
+  arc_d: !ref <arc_d>
+  lab_h: !ref <lab_h>
+  lab_d: !ref <lab_d>
+  biased_biaffine: True
+  input_size: !ref <n_neurons>
+  num_labels: !ref <num_labels>
+
+
+#
+# Functions and classes
+#
+epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
+    limit: !ref <number_of_epochs>
+
+augmentation: !new:speechbrain.lobes.augment.TimeDomainSpecAugment
+    sample_rate: !ref <sample_rate>
+    speeds: [95, 100, 105]
+
+enc: !new:speechbrain.nnet.containers.Sequential
+    input_shape: [null, null, 1024]
+    linear1: !name:speechbrain.nnet.linear.Linear
+        n_neurons: 1024
+        bias: True
+    bn1: !name:speechbrain.nnet.normalization.BatchNorm1d
+    activation: !new:torch.nn.LeakyReLU
+    drop: !new:torch.nn.Dropout
+        p: 0.15
+    linear2: !name:speechbrain.nnet.linear.Linear
+        n_neurons: 1024
+        bias: True
+    bn2: !name:speechbrain.nnet.normalization.BatchNorm1d
+    activation2: !new:torch.nn.LeakyReLU
+    drop2: !new:torch.nn.Dropout
+        p: 0.15
+    linear3: !name:speechbrain.nnet.linear.Linear
+        n_neurons: 1024
+        bias: True
+    bn3: !name:speechbrain.nnet.normalization.BatchNorm1d
+    activation3: !new:torch.nn.LeakyReLU
+
+wav2vec2: !new:speechbrain.lobes.models.huggingface_wav2vec.HuggingFaceWav2Vec2
+    source: !ref <wav2vec2_hub>
+    output_norm: True
+    freeze: !ref <freeze_wav2vec>
+    save_path: !ref <save_folder>/wav2vec2_checkpoint
+
+#####
+# Uncomment this block if you prefer to use a Fairseq pretrained model instead
+# of a HuggingFace one. Here, we provide an URL that is obtained from the
+# Fairseq github for the multilingual XLSR.
+#
+#wav2vec2_url: https://dl.fbaipublicfiles.com/fairseq/wav2vec/xlsr_53_56k.pt
+#wav2vec2: !new:speechbrain.lobes.models.fairseq_wav2vec.FairseqWav2Vec2
+#    pretrained_path: !ref <wav2vec2_url>
+#    output_norm: True
+#    freeze: False
+#    save_path: !ref <save_folder>/wav2vec2_checkpoint/model.pt
+#####
+
+
+ctc_lin: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: !ref <output_neurons>
+
+log_softmax: !new:speechbrain.nnet.activations.Softmax
+    apply_log: True
+
+
+# Loss functions
+
+ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: !ref <blank_index>
+
+depLabel_cost: !name:speechbrain.nnet.losses.nll_loss
+
+govLabel_cost: !name:speechbrain.nnet.losses.nll_loss
+
+posLabel_cost: !name:speechbrain.nnet.losses.nll_loss
+
+#Modules and training model parameter
+
+modules:
+    wav2vec2: !ref <wav2vec2>
+    enc: !ref <enc>
+    ctc_lin: !ref <ctc_lin>
+    RepFusionModel: !ref <RepFusionModel>
+    posTagger: !ref <pos_tagger>
+    arc_h: !ref <arc_h>
+    arc_d: !ref <arc_d>
+    lab_h: !ref <lab_h>
+    lab_d: !ref <lab_d>
+    rnn: !ref <rnn>
+    graph_parser: !ref <graph_parser>
+    embedding_root: !ref <embedding_root>
+
+
+
+model: !new:torch.nn.ModuleList
+    - [!ref <enc>, !ref <ctc_lin>, !ref <RepFusionModel>, !ref <pos_tagger>,
+       !ref <arc_h>, !ref <arc_d>, !ref <lab_h>, !ref <lab_d>, !ref <rnn>,
+       !ref <embedding_root>]
+
+model_opt_class: !name:torch.optim.Adadelta
+    lr: !ref <lr>
+    rho: 0.95
+    eps: 1.e-8
+
+wav2vec_opt_class: !name:torch.optim.Adam
+    lr: !ref <lr_wav2vec>
+
+lr_annealing_model: !new:speechbrain.nnet.schedulers.NewBobScheduler
+    initial_value: !ref <lr>
+    improvement_threshold: 0.0025
+    annealing_factor: 0.8
+    patient: 0
+
+lr_annealing_wav2vec: !new:speechbrain.nnet.schedulers.NewBobScheduler
+    initial_value: !ref <lr_wav2vec>
+    improvement_threshold: 0.0025
+    annealing_factor: 0.9
+    patient: 0
+
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+    checkpoints_dir: !ref <save_folder>
+    recoverables:
+        wav2vec2: !ref <wav2vec2>
+        model: !ref <model>
+        scheduler_model: !ref <lr_annealing_model>
+        scheduler_wav2vec: !ref <lr_annealing_wav2vec>
+        counter: !ref <epoch_counter>
+
+train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
+    save_file: !ref <train_log>
+
+#train_logger: !new:speechbrain.utils.train_logger.WandBLogger
+#        yaml_config: hparams/logger.yaml
+
+#
+# METRICS
+#
+error_rate_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
+
+cer_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
+    split_tokens: True
+
+dep2Label_computer: !name:speechbrain.utils.metric_stats.BinaryMetricStats
+
+gov2Label_computer: !name:speechbrain.utils.metric_stats.BinaryMetricStats
+
+#
+# PARSING ARCHI
+#
+
+LABEL_PADDING: -100
+
+reader_alig:  !new:parsebrain.processing.dependency_parsing.sequence_labeling.alignment_oracle.reader.ReaderSpeechbrain
+
+oracle: !new:parsebrain.processing.dependency_parsing.graph_based.alignment_oracle.AlignmentOracle
+    reader_alig: !ref <reader_alig>
+
+evaluator : !new:parsebrain.processing.dependency_parsing.eval.speech_conll18_ud_eval.SpeechEval
+
+encoding: !new:parsebrain.processing.dependency_parsing.sequence_labeling.encoding.RelPosEncoding
+
+#
+## File path
+#
+alig_path: !ref <output_folder>/alignment_file
+
+# FOr debugging purpose (error with pytorch not understandable while on GPU)
+#device: cpu

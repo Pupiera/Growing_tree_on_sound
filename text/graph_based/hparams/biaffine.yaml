@@ -1,0 +1,242 @@
+seed: 1234
+__set_seed: !!python/object/apply:torch.manual_seed [ !ref <seed> ]
+output_folder: !ref results/Orfeo_graph_based/<seed>
+wer_file: !ref <output_folder>/wer.txt
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+
+#Data files
+data_folder: /home/getalp/pupiera/thesis/endtoend_asr_multitask/src/conllu/gold/ #/home/pupiera/getalp/pupiera/conllu/gold
+train_conllu: !ref <data_folder>/cleaned_v2_train.conllu #!ref <data_folder>/orfeo_shuf.mini_train
+valid_conllu: !ref <data_folder>/cleaned_v2_valid.conllu #!ref <data_folder>/orfeo_shuf.mini_train #!ref <data_folder>/orfeo_shuf.dev
+test_conllu: !ref <data_folder>/cleaned_v2_test_2.conllu
+
+
+
+# Specific information related to conllu file
+conllu_keys: [ 'lineNumber', 'words', 'lemmas','POS','UPOS','tags',
+               'HEAD','DEP','tags2','tags3','timestamp_begin',
+               'timestamp_end','speaker' ]
+
+
+#
+# # Dataloader
+#
+
+# With data_parallel batch_size is split into N jobs
+# With DDP batch_size is multiplied by N jobs
+# Must be 6 per GPU to fit 16GB of VRAM
+batch_size: 8 #8
+test_batch_size: 4 #4
+
+#No idea why it does not find PaddedBatch.
+#collate_fn: !name:speechbrain.dataio.batch.PaddedBatch:
+#  padding_kwargs:
+#    value: -100
+
+dataloader_options:
+  batch_size: !ref <batch_size>
+  num_workers: 1
+#  collate_fn: !ref <collate_fn>
+
+
+test_dataloader_options:
+  batch_size: !ref <test_batch_size>
+  num_workers: 1
+#  collate_fn: !ref <collate_fn>
+
+
+
+
+# Decoding parameters
+# Be sure that the bos and eos index match with the BPEs ones
+blank_index: 0
+bos_index: 5
+eos_index: 6
+
+
+#tokenizer
+#pretrained_lm_path: /home/getalp/pupiera/thesis/endtoend_asr_multitask/src/LM/camembert-base
+tokenizer: !new:sentencepiece.SentencePieceProcessor
+
+
+embedding_dim: 768
+
+# Features extractor
+
+features_extractor: !new:parsebrain.hugging_face_text.LastSubWordEmbedding
+
+
+# Parser
+
+number_pos: 22
+num_labels: 15
+bert_embedding_size: 768
+mlp_input: !ref <bert_embedding_size> * 2
+
+pos_tagger: !new:speechbrain.nnet.containers.Sequential
+  input_shape: [ null, null, !ref <mlp_input> ]
+  linear1: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <embedding_dim>
+    bias: True
+  bn1: !name:speechbrain.nnet.normalization.BatchNorm1d
+  activation: !new:torch.nn.LeakyReLU
+  drop: !new:torch.nn.Dropout
+    p: 0.50
+  linear_head: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <number_pos>
+    bias: True
+  log_softmax: !new:speechbrain.nnet.activations.Softmax
+    apply_log: True
+
+softmax: !new:speechbrain.nnet.activations.Softmax
+    apply_log: True
+
+# No log here because the representation will be used in the biaffine part
+
+
+arc_d: !new:speechbrain.nnet.containers.Sequential
+  input_shape: [ null, null, !ref <mlp_input> ]
+  linear1: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <embedding_dim>
+    bias: True
+  bn1: !name:speechbrain.nnet.normalization.BatchNorm1d
+  activation: !new:torch.nn.LeakyReLU
+  drop: !new:torch.nn.Dropout
+    p: 0.50
+  linear_head: !name:speechbrain.nnet.linear.Linear
+    n_neurons: 768
+    bias: True
+
+arc_h: !new:speechbrain.nnet.containers.Sequential
+  input_shape: [ null, null, !ref <mlp_input> ]
+  linear1: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <embedding_dim>
+    bias: True
+  bn1: !name:speechbrain.nnet.normalization.BatchNorm1d
+  activation: !new:torch.nn.LeakyReLU
+  drop: !new:torch.nn.Dropout
+    p: 0.50
+  linear_head: !name:speechbrain.nnet.linear.Linear
+    n_neurons: 768
+    bias: True
+
+lab_d: !new:speechbrain.nnet.containers.Sequential
+  input_shape: [ null, null, !ref <mlp_input> ]
+  linear1: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <embedding_dim>
+    bias: True
+  bn1: !name:speechbrain.nnet.normalization.BatchNorm1d
+  activation: !new:torch.nn.LeakyReLU
+  drop: !new:torch.nn.Dropout
+    p: 0.50
+  linear_head: !name:speechbrain.nnet.linear.Linear
+    n_neurons: 768
+    bias: True
+
+lab_h: !new:speechbrain.nnet.containers.Sequential
+  input_shape: [ null, null, !ref <mlp_input> ]
+  linear1: !name:speechbrain.nnet.linear.Linear
+    n_neurons: !ref <embedding_dim>
+    bias: True
+  bn1: !name:speechbrain.nnet.normalization.BatchNorm1d
+  activation: !new:torch.nn.LeakyReLU
+  drop: !new:torch.nn.Dropout
+    p: 0.50
+  linear_head: !name:speechbrain.nnet.linear.Linear
+    n_neurons: 768
+    bias: True
+
+
+# same value than in hops
+rnn_hidden_size: 768
+rnn_num_layer: 2
+rnn_bidirectional: True
+
+rnn:  !new:speechbrain.nnet.RNN.LSTM
+  input_shape: [null, null, 768]
+  hidden_size: !ref <rnn_hidden_size>
+  num_layers: !ref <rnn_num_layer>
+  bias: True
+  dropout: 0.5
+  bidirectional: !ref <rnn_bidirectional>
+
+graph_parser: !new:parsebrain.processing.dependency_parsing.graph_based.BiAffineParser
+  pos_tagger: !ref <pos_tagger>
+  arc_h: !ref <arc_h>
+  arc_d: !ref <arc_d>
+  lab_h: !ref <lab_h>
+  lab_d: !ref <lab_d>
+  biased_biaffine: True
+  input_size: 768
+  num_labels: !ref <num_labels>
+
+# Training parameters
+number_of_epochs: 50
+
+ckpt_interval_minutes: 30 # save checkpoint every N minutes
+
+lr: 0.001
+model_opt_class: !name:torch.optim.Adam
+  lr: !ref <lr>
+
+
+epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
+  limit: !ref <number_of_epochs>
+
+modules:
+  graph_parser: !ref <graph_parser>
+  pos_tagger: !ref <pos_tagger>
+  arc_h: !ref <arc_h>
+  arc_d: !ref <arc_d>
+  lab_h: !ref <lab_h>
+  lab_d: !ref <lab_d>
+  rnn: !ref <rnn>
+
+model: !new:torch.nn.ModuleList
+  - [!ref <pos_tagger>,
+      !ref <arc_h>, !ref <arc_d>, !ref <lab_h>,
+      !ref <lab_d>, !ref <rnn>, !ref <graph_parser>]
+
+
+#
+# # loss/cost
+#
+arc_cost: !name:speechbrain.nnet.losses.nll_loss
+  reduction: "mean"
+
+dep_cost: !name:speechbrain.nnet.losses.nll_loss
+  reduction: "mean"
+
+pos_cost: !name:speechbrain.nnet.losses.nll_loss
+  reduction: "mean"
+
+LABEL_PADDING: -100
+#
+# Metrics
+#
+
+eval_conll: !new:parsebrain.processing.dependency_parsing.eval.conll18_ud_eval.TextEval
+
+
+#
+# CONLLU output file
+#
+
+file_valid: !ref <output_folder>/output_VALID.conll
+file_test: !ref <output_folder>/output_TEST.conll
+
+#
+# Checkpointer
+#
+
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+  checkpoints_dir: !ref <save_folder>
+  recoverables:
+    model: !ref <model>
+    #scheduler_model: !ref <lr_annealing_model>
+    counter: !ref <epoch_counter>
+
+train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
+    save_file: !ref <train_log>
+
